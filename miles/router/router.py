@@ -22,6 +22,18 @@ def run_router(args):
     # Visible to `pkill -9 miles`; without this the daemon inherits "python".
     setproctitle.setproctitle("miles-router")
 
+    # Same fork-inherited W&B hazard as the session server: this forked proxy
+    # inherits a wandb service-connection object whose weakref finalizer, when GC
+    # fires it inside build_proxy_response's json.loads, blocks forever on the
+    # absent wandb asyncer and freezes the uvicorn event loop -> all rollout
+    # dispatch wedges. The router never logs to W&B, so no-op that cleanup.
+    try:
+        from wandb.sdk.lib.service.service_connection import ServiceConnection
+
+        ServiceConnection.api_cleanup_request = lambda self, api_id: None
+    except Exception:  # noqa: BLE001 - never let W&B internals block the proxy
+        pass
+
     # Initialize the router with tokenizer and lazy worker initialization
     miles_router = MilesRouter(args, verbose=False)
 

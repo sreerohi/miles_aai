@@ -189,10 +189,7 @@ def setup_session_routes(app, backend, args):
                 )
             assistant_message = choice.get("message", {})
             if assistant_message.get("content") is None:
-                raise UpstreamResponseError(
-                    "assistant message content is None, when tool call parser failed SGLang should still return "
-                    "an empty content rather than None. Please check your modified SGLang version."
-                )
+                assistant_message["content"] = ""
 
             output_token_logprobs = meta_info["output_token_logprobs"]
             completion_tokens = meta_info["completion_tokens"]

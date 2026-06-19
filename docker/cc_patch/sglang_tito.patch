@@ -1,0 +1,73 @@
+--- a/python/sglang/srt/entrypoints/openai/protocol.py	2026-03-10 23:09:34.000000000 +0000
++++ b/python/sglang/srt/entrypoints/openai/protocol.py	2026-06-05 20:07:47.000000000 +0000
+@@ -568,6 +568,8 @@
+     return_routed_experts: bool = False
+     return_cached_tokens_details: bool = False
+     return_prompt_token_ids: bool = False
++    return_meta_info: bool = False
++    input_ids: Optional[List[int]] = None
+     reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(
+         default="medium",
+         description="Constrains effort on reasoning for reasoning models. "
+@@ -806,6 +808,7 @@
+     matched_stop: Union[None, int, str] = None
+     hidden_states: Optional[object] = None
+     prompt_token_ids: Optional[List[int]] = None
++    meta_info: Optional[dict] = None
+ 
+     @model_serializer(mode="wrap")
+     def _serialize(self, handler):
+@@ -814,6 +817,8 @@
+             data.pop("hidden_states", None)
+         if self.prompt_token_ids is None:
+             data.pop("prompt_token_ids", None)
++        if self.meta_info is None:
++            data.pop("meta_info", None)
+         return data
+ 
+ 
+--- a/python/sglang/srt/entrypoints/openai/serving_chat.py	2026-03-10 23:09:34.000000000 +0000
++++ b/python/sglang/srt/entrypoints/openai/serving_chat.py	2026-06-05 20:07:47.000000000 +0000
+@@ -276,7 +276,10 @@
+             if isinstance(processed_messages.prompt_ids, str):
+                 prompt_kwargs = {"text": processed_messages.prompt_ids}
+             else:
+-                prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
++                if getattr(request, "input_ids", None) is not None:
++                    prompt_kwargs = {"input_ids": request.input_ids}
++                else:
++                    prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
+ 
+         # Extract custom labels from raw request headers
+         custom_labels = self.extract_custom_labels(raw_request)
+@@ -974,6 +977,11 @@
+                 if request.return_prompt_token_ids
+                 else None
+             )
++            choice_meta_info = (
++                ret_item.get("meta_info")
++                if getattr(request, "return_meta_info", False)
++                else None
++            )
+ 
+             choice_data = ChatCompletionResponseChoice(
+                 index=idx,
+@@ -992,6 +1000,7 @@
+                 ),
+                 hidden_states=hidden_states,
+                 prompt_token_ids=choice_prompt_token_ids,
++                meta_info=choice_meta_info,
+             )
+             choices.append(choice_data)
+ 
+--- a/python/sglang/srt/managers/tokenizer_manager.py	2026-03-10 23:09:34.000000000 +0000
++++ b/python/sglang/srt/managers/tokenizer_manager.py	2026-06-05 20:07:47.000000000 +0000
+@@ -1813,7 +1813,7 @@
+             ]
+         else:
+             assert self.tokenizer is not None
+-            token_texts = self.tokenizer.batch_decode(token_logprobs_idx)
++            token_texts = self.tokenizer.batch_decode([[tid] for tid in token_logprobs_idx])
+             return list(zip(token_logprobs_val, token_logprobs_idx, token_texts))
+ 
+     def detokenize_top_logprobs_tokens(

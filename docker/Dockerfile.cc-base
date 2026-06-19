@@ -1,0 +1,51 @@
+# Reproducible miles BASE image (non-miles changes only).
+#
+# Equivalent to the functional content of miles_swe_patched:d1 WITHOUT the ~8 GB
+# of incidental commit bloat and WITHOUT miles/ baked. The rlsys base already
+# carries AITER/TransformerEngine/Megatron(+megatron.patch)/torch_memory_saver and
+# all the ROCm + SGLang env vars; the ONLY functional delta in d1 was the 3 SGLang
+# TITO source patches, which we apply here as a real, reviewable patch.
+#
+# Build context = docker/ :  docker build -f docker/Dockerfile.cc-base docker/ -t miles_base:v1
+FROM rlsys/miles:rocm7-MI300-sglang0.5.9-latest
+
+# Apply the SGLang TITO patches (8i input_ids, 8j return_meta_info/meta_info, 8k
+# per-token batch_decode) and assert they landed.
+COPY cc_patch/sglang_tito.patch /tmp/sglang_tito.patch
+RUN cd /app/sglang \
+    && git apply -p1 /tmp/sglang_tito.patch \
+    && grep -q "return_meta_info" python/sglang/srt/entrypoints/openai/protocol.py \
+    && grep -q "input_ids: Optional" python/sglang/srt/entrypoints/openai/protocol.py \
+    && grep -q "meta_info=choice_meta_info" python/sglang/srt/entrypoints/openai/serving_chat.py \
+    && grep -q "batch_decode(\[\[tid\]" python/sglang/srt/managers/tokenizer_manager.py \
+    && echo "TITO patch applied + verified" \
+    && rm -f /tmp/sglang_tito.patch
+
+# Drop any stale bytecode so the patched .py files recompile fresh.
+RUN find /app/sglang -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Bake the miles requirements.txt deps that the rlsys base does NOT carry, so a
+# runtime container only needs a fast `pip install -e . --no-deps` for miles
+# itself (the miles source still comes from the bind mount; it is intentionally
+# NOT baked in this base image). Without these, a fresh container hits
+# ModuleNotFoundError at convert/rollout time (miles_plugins needs miles
+# installed; pylatexenc/wandb/omegaconf/memray/qwen_vl_utils/ring_flash_attn are
+# imported by miles). torch-linked packages (ring_flash_attn, torchft) use
+# --no-deps so pip cannot pull a non-ROCm torch over the base's custom build.
+RUN pip install --no-cache-dir \
+        wandb \
+        omegaconf \
+        memray \
+        "mcp[cli]" \
+        qwen_vl_utils \
+        polars \
+        pylatexenc \
+        opentelemetry-exporter-otlp-proto-http \
+    && pip install --no-cache-dir --no-deps \
+        ring_flash_attn \
+        "torchft-nightly==2026.4.3"
+
+# NOTE: no miles/ baked here (comes from the bind mount); no env changes needed
+# (already set in the rlsys base). Runtime still needs the fast, source-dependent
+# step:  cd /root/miles_qwen && pip install -e . --no-deps --no-build-isolation
+CMD ["sleep", "infinity"]

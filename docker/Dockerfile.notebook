@@ -1,0 +1,53 @@
+# Notebook driver image for the qwen3-codecontests workshop.
+#
+# Runs JupyterLab on Python 3.10.12 and drives the whole run by issuing
+# `docker run` / `docker exec` against the HOST Docker daemon via the bind-mounted
+# socket (/var/run/docker.sock). It therefore needs only the docker CLI *client*
+# (NOT a daemon) plus the Compose v2 plugin (Harbor brings task envs up with
+# `docker compose`). The miles_base:v1 / agent_base:v1 containers it launches are
+# siblings on the host daemon, so host paths must line up -- the notebook
+# identity-mounts $WORK_DIR (see the Config cell in run_from_scratch.ipynb).
+#
+# Build:  docker build -f docker/Dockerfile.notebook docker/ -t cc_notebook:v1
+# Run:    bash docker/run_notebook.sh   (see that script for the mounts/env)
+FROM python:3.10.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI client only (no daemon), installed as a distro-agnostic static binary
+# so this does not depend on Debian's docker packaging. At runtime it talks to the
+# HOST daemon through the bind-mounted /var/run/docker.sock.
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
+    && docker --version
+
+# Compose v2 plugin (pinned to match Dockerfile.agent-base).
+ARG COMPOSE_VERSION=v2.29.7
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version
+
+# JupyterLab + the libs the monitoring cells import (plotly hover charts need nbformat).
+RUN pip install --no-cache-dir \
+        jupyterlab \
+        plotly \
+        nbformat \
+        pandas
+
+# No hardcoded WORKDIR: the repo is identity-mounted at an arbitrary host path at
+# runtime, so run_notebook.sh drops you into a shell there via `docker exec -w "$EX"`.
+# The container just needs to stay alive; you start JupyterLab yourself from the
+# shell, e.g.:  jupyter lab --ip=0.0.0.0 --port=8888 --allow-root --no-browser
+EXPOSE 8888
+CMD ["sleep", "infinity"]

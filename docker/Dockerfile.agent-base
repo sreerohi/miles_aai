@@ -1,0 +1,42 @@
+# Reproducible agent_env (Harbor orchestrator) base image.
+#
+# Mirrors agent_env_patched:d1 (which was a docker commit, not code):
+#   base  : python:3.12.13-slim (Debian trixie)
+#   apt   : docker CLI (talks to the host socket for Docker-in-Docker), git, curl
+#   pip   : harbor + mini-swe-agent (pull fastapi/uvicorn/litellm/pydantic/... as deps)
+#
+# server.py + the harbor/ configs are NOT baked here - they come from the
+# bind-mounted miles repo at runtime (base-only, mirrors the miles image).
+FROM python:3.12.13-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+# Docker-in-Docker needs only the docker CLI client (NOT the daemon). On Debian
+# trixie the client lives in `docker-cli` (the `docker.io` package now ships only
+# dockerd). git/curl used by Harbor + tasks.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker-cli \
+        git \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Harbor brings task environments up with `docker compose` (via the
+# HARBOR_EXTRA_DOCKER_COMPOSE swe-net override). Debian's `docker-cli` ships
+# WITHOUT the compose plugin, so install the Compose v2 plugin binary directly
+# (pinned to the v2.29.7 that agent_env_patched:d1 carried).
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version
+
+# Harbor orchestrator + the mini-swe-agent runner (versions match agent_env_patched:d1).
+RUN pip install --no-cache-dir \
+        harbor==0.13.1 \
+        mini-swe-agent==2.3.0
+
+WORKDIR /root
+CMD ["sleep", "infinity"]

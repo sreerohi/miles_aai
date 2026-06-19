@@ -101,6 +101,21 @@ def run_session_server(args, backend_url: str):
     # Visible to `pkill -9 miles`; without this the daemon inherits "python".
     setproctitle.setproctitle("miles-session-server")
 
+    # This forked proxy inherits W&B service-connection objects from the parent
+    # (RolloutManager) but runs no wandb-core service of its own. When GC
+    # finalizes such an inherited object, ServiceConnection.api_cleanup_request
+    # blocks forever on the absent asyncer, freezing this uvicorn event loop and
+    # wedging ALL rollout dispatch. The proxy never needs W&B, so make that
+    # cleanup a no-op. Patching the class method also covers already-created
+    # (inherited) objects: the weakref finalizer calls connection.api_cleanup_request
+    # and resolves the method live at call time.
+    try:
+        from wandb.sdk.lib.service.service_connection import ServiceConnection
+
+        ServiceConnection.api_cleanup_request = lambda self, api_id: None
+    except Exception:  # noqa: BLE001 - never let W&B internals block the proxy
+        pass
+
     server = SessionServer(args, backend_url)
     logger.info(
         "[session-server] Starting on %s:%s, proxying to %s",

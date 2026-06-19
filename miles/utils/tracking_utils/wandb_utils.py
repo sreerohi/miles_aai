@@ -22,7 +22,10 @@ def _is_offline_mode(args) -> bool:
 
 
 def _wandb_settings(**kwargs):
-    return wandb.Settings(init_timeout=300.0, **kwargs)
+    # Fail fast instead of hanging the (rollout-worker) dispatch loop for 5 min
+    # if the W&B backend stalls. Overridable via WANDB_INIT_TIMEOUT.
+    init_timeout = float(os.environ.get("WANDB_INIT_TIMEOUT", "90"))
+    return wandb.Settings(init_timeout=init_timeout, **kwargs)
 
 
 def init_wandb_primary(args):
@@ -43,7 +46,7 @@ def init_wandb_primary(args):
     offline = _is_offline_mode(args)
 
     # Only perform explicit login when NOT offline
-    if (not offline) and args.wandb_key is not None:
+    if (not offline) and args.wandb_key:  # truthy: empty key -> wandb.login can hang
         wandb.login(key=args.wandb_key, host=args.wandb_host)
 
     # Prepare wandb init parameters
@@ -113,7 +116,7 @@ def init_wandb_secondary(args, router_addr=None):
 
     offline = _is_offline_mode(args)
 
-    if (not offline) and args.wandb_key is not None:
+    if (not offline) and args.wandb_key:  # truthy: empty key -> wandb.login can hang
         wandb.login(key=args.wandb_key, host=args.wandb_host)
 
     # Configure settings based on offline/online mode
@@ -152,9 +155,15 @@ def init_wandb_secondary(args, router_addr=None):
         os.makedirs(args.wandb_dir, exist_ok=True)
         init_kwargs["dir"] = args.wandb_dir
 
-    wandb.init(**init_kwargs)
-
-    _init_wandb_common()
+    try:
+        wandb.init(**init_kwargs)
+        _init_wandb_common()
+    except Exception as e:
+        # A stalled/slow shared-mode attach must not wedge the rollout dispatch
+        # loop. Degrade gracefully: this worker just won't mirror metrics.
+        logger.warning(
+            f"W&B secondary init failed ({e!r}); continuing without W&B on this worker."
+        )
 
 
 def _init_wandb_common():

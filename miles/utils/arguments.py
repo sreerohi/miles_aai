@@ -1968,6 +1968,16 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 
 def miles_validate_args(args):
+    # These SGLang piecewise-cuda-graph knobs are referenced by validation below
+    # but not registered as CLI args in this build; default them so colocate
+    # validation works (False => no enforce warning; colocate disables piecewise).
+    for _name, _default in (
+        ("sglang_enforce_piecewise_cuda_graph", False),
+        ("sglang_disable_piecewise_cuda_graph", False),
+    ):
+        if not hasattr(args, _name):
+            setattr(args, _name, _default)
+
     args.eval_datasets = _resolve_eval_datasets(args)
 
     if args.recompute_logprobs_via_prefill:
