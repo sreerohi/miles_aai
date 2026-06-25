@@ -161,9 +161,9 @@ def rollout_panel(log, trials_dir, harbor_log, maxrows=8, scope_ep=None, title="
             st = f"  {_state(exit_status)}" if show_state else ""  # show the specific status in "Other"
             out.append(f"[{i}] {name}{st}  {_reward(reward)}  turns={turns}")
             if cmd:
-                out.append(f"     cmd: {cmd}")
+                out.append(f"     LLM's cmd: {cmd}")
             if res:
-                out.append(f"     out: {res}")
+                out.append(f"     Env out: {res}")
 
     _emit("Submitted", "submitted", False)
     _emit("running", "running", False)

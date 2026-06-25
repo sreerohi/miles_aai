@@ -114,8 +114,13 @@ def render_charts(s):
           "including step 0); not wall-clock timed by this monitor.")
 
 
-def watch_training(work_dir=None, poll=8):
-    """W&B link + train.log tail + current-step rollout panel + live charts. Interrupt to stop."""
+def watch_training(work_dir=None, poll=8, raw=True, tail_lines=5):
+    """W&B link + train.log tail + current-step rollout panel + live charts. Interrupt to stop.
+
+    raw=True (default) shows the full unfiltered train.log tail (a live stream, the last
+    ``tail_lines`` lines); raw=False shows only curated milestone lines (step/rollout/perf/
+    checkpoint/traceback).
+    """
     work = rollout_monitor.default_work_dir(work_dir)
     tlog, trials, harbor_log = f"{work}/train.log", f"{work}/cc_trials", f"{work}/harbor.log"
     try:
@@ -130,9 +135,16 @@ def watch_training(work_dir=None, poll=8):
             url = wandb_url(tlog)
             print(f"W&B run: {url}" if url else "W&B run: (link not in train.log yet)")
 
-            # (2) Live training-log tail (interesting lines only).
-            loglines = [ANSI.sub("", l) for l in rollout_monitor._tail(tlog, 300).splitlines() if LOGPAT.search(l)][-12:]
-            print("\n=== train.log (tail) ===")
+            # (2) train.log tail. Default = full unfiltered stream (last tail_lines, like
+            # `tail -f`); raw=False = only step/rollout/perf/checkpoint/traceback lines.
+            if raw:
+                loglines = [ANSI.sub("", l) for l in rollout_monitor._tail(tlog, tail_lines).splitlines()]
+                header = f"=== train.log (raw tail, last {tail_lines}) ==="
+            else:
+                loglines = [ANSI.sub("", l) for l in rollout_monitor._tail(tlog, 300).splitlines()
+                            if LOGPAT.search(l)][-tail_lines:]
+                header = "=== train.log (tail) ==="
+            print(f"\n{header}")
             print("\n".join(loglines) or "(waiting for log...)")
 
             # (3) Per-sample rollout panel for the CURRENT step (scope to samples after the last finished step).
