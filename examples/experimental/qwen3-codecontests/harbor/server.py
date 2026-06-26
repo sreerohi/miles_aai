@@ -258,9 +258,14 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
             # CodeContests tasks ship an environment/Dockerfile (ignored on the
             # bare host) and the agent writes /app/solution.py in one exec that a
             # separate verifier exec grades, so /app must persist across execs.
+            # sandbox_backend defaults to "proot" (userspace, ptrace-based) so the
+            # workshop runs in a fully NON-privileged Kubernetes pod under the
+            # RuntimeDefault seccomp profile; set HARBOR_SANDBOX_BACKEND=bwrap for
+            # privileged/CI hosts with user namespaces.
             env_config_kwargs["kwargs"] = {
                 "ignore_build": True,
                 "persist_roots": ["/app"],
+                "sandbox_backend": os.getenv("HARBOR_SANDBOX_BACKEND", "proot"),
             }
         else:
             # Docker path only: extra docker-compose override(s) so task

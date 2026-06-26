@@ -52,7 +52,12 @@ RUN pip install --no-cache-dir \
 
 # --------------------------------------------------------------------------- #
 # 3. Bare-host grading toolchain (replaces Docker-in-Docker task sandboxes).
-#    - bubblewrap: the subprocess env's sandbox mechanism.
+#    - proot: the DEFAULT subprocess backend (userspace, ptrace-based path
+#      binding). Needs no namespaces/capabilities, so grading runs in a fully
+#      NON-privileged Kubernetes pod (RuntimeDefault seccomp) -- the right fit
+#      for untrusted task code where the pod is the security boundary.
+#    - bubblewrap: the alternate backend (HARBOR_SANDBOX_BACKEND=bwrap) for
+#      privileged/CI hosts with unprivileged user namespaces.
 #    - curl/jq/git: used by the per-task tests/test.sh bootstrap.
 #    The dataset test.sh still curls uv + `uv add`s pytest at runtime (egress
 #    assumed); we also bake uv + pytest + the json-ctrf plugin so the original
@@ -61,12 +66,14 @@ RUN pip install --no-cache-dir \
 # --------------------------------------------------------------------------- #
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        proot \
         bubblewrap \
         curl \
         jq \
         git \
         ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && proot --version | head -1
 RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && uv --version
@@ -77,13 +84,23 @@ RUN pip install --no-cache-dir \
 
 # --------------------------------------------------------------------------- #
 # 4. Harbor (with the subprocess environment) + the mini-swe-agent runner.
+#    Harbor requires Python >=3.12 but the rlsys base is Python 3.10 (and the
+#    whole miles/torch/SGLang stack is bound to it), so harbor CANNOT share the
+#    base interpreter. Install it into an isolated uv-managed 3.12 venv; the
+#    harbor server runs with that interpreter (HARBOR_PYTHON) while training
+#    keeps using the base python3. The two roles are separate processes that
+#    only talk over HTTP (localhost:11000), so they never share a Python.
 #    Pulled from the fork branch until the subprocess env lands upstream.
 # --------------------------------------------------------------------------- #
 ARG HARBOR_REF=git+https://github.com/TwelveNights/harbor.git@feat/subprocess-environment
-RUN pip install --no-cache-dir \
+ENV HARBOR_VENV=/opt/harbor-venv
+ENV HARBOR_PYTHON=${HARBOR_VENV}/bin/python
+RUN uv python install 3.12 \
+    && uv venv --python 3.12 "${HARBOR_VENV}" \
+    && VIRTUAL_ENV="${HARBOR_VENV}" uv pip install --python "${HARBOR_PYTHON}" \
         "harbor @ ${HARBOR_REF}" \
         mini-swe-agent==2.3.0 \
-    && python -c "from harbor.environments.subprocess import SubprocessEnvironment; print('harbor subprocess env ok')"
+    && "${HARBOR_PYTHON}" -c "from harbor.environments.subprocess import SubprocessEnvironment; print('harbor subprocess env ok')"
 
 # --------------------------------------------------------------------------- #
 # 5. JupyterLab + the monitoring libs the notebook imports.

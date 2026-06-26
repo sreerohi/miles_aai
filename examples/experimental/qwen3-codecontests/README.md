@@ -62,6 +62,17 @@ dataset is baked in.
 - **ROCm/MI300-specific & large.** Inherits the same rlsys base as
   `Dockerfile.cc-base` (~75GB). Other accelerators should adapt from the
   per-arch Dockerfiles.
+- **Grading sandbox / Kubernetes.** Harbor grades each task on the bare host via
+  the `subprocess` environment's **proot** backend (userspace, ptrace-based path
+  binding). proot needs no namespaces or capabilities, so the workshop runs in a
+  fully **non-privileged** pod under the `RuntimeDefault` seccomp profile — the
+  pod is the security boundary for untrusted task code; there is no
+  Docker-in-Docker and no privileged container. The alternate `bwrap` backend
+  (`HARBOR_SANDBOX_BACKEND=bwrap`) needs unprivileged user namespaces (or a
+  privileged container) and is meant for trusted CI/dev hosts.
+- **Do not co-locate untrusted grading with privileged training.** If a pod runs
+  untrusted code, keep it non-privileged (proot backend); run privileged
+  SGLang/ROCm training in a separate trust domain.
 - **Grading network egress.** Each task's `tests/test.sh` (from the dataset, not
   editable) still `curl`s `uv` and `uv add`s pytest at runtime; the image bakes
   these so the original `pytest --ctrf` path resolves, but PyPI/astral egress is
@@ -69,7 +80,8 @@ dataset is baked in.
 - **Reset is less hermetic.** With one container there is no `docker restart` to
   clear ray/sglang; §9 kills the processes instead. If endpoint errors persist
   after a reset, relaunch the container.
-- **Override knobs:** `HARBOR_ENV_TYPE=docker` restores the legacy DinD path;
+- **Override knobs:** `HARBOR_SANDBOX_BACKEND=bwrap` switches the sandbox
+  backend; `HARBOR_ENV_TYPE=docker` restores the legacy DinD path;
   `HARBOR_TASKS_DIR` points at a different task set; `HARBOR_REF` (build arg)
   pins a different Harbor.
 
