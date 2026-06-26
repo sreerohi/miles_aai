@@ -42,6 +42,9 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
     -e GPU="$GPU" \
     -e WANDB_KEY="$WANDB_KEY" \
     -e HARBOR_TRIALS_DIR="$WORK_DIR/cc_trials" \
+    -e MILES_HOST_IP="${MILES_HOST_IP:-127.0.0.1}" \
+    -e MILES_ROUTER_EXTERNAL_HOST="${MILES_ROUTER_EXTERNAL_HOST:-127.0.0.1}" \
+    -e HARBOR_SANDBOX_BACKEND="${HARBOR_SANDBOX_BACKEND:-proot}" \
     "$IMAGE"
 fi
 

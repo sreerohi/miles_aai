@@ -71,9 +71,28 @@ RUN apt-get update \
         curl \
         jq \
         git \
+        build-essential \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && proot --version | head -1
+# No-op apt-get shim. The consolidated single-host model runs many agents at once
+# (--max-concurrent), and the mini-swe-agent setup + dataset test.sh both call
+# `apt-get update && install` on the SHARED host. apt's lists lock has NO native
+# timeout, so concurrent calls collide -> "Could not get lock" (exit 100) ->
+# agent setup fails -> every trial AgentError -> all rewards 0. Serializing with
+# flock just deadlocks the queue. Since curl/git/build-essential are already baked
+# above, the right fix is to make update/install/upgrade no-op successes; any
+# other apt-get subcommand still falls through to the real binary.
+RUN mv /usr/bin/apt-get /usr/bin/apt-get.real \
+    && printf '%s\n' \
+        '#!/bin/bash' \
+        '# baked image: build tools already present; avoid concurrent apt lock collisions' \
+        'case "$1" in' \
+        '  update|install|upgrade|"") exit 0 ;;' \
+        '  *) exec /usr/bin/apt-get.real "$@" ;;' \
+        'esac' \
+        > /usr/bin/apt-get \
+    && chmod +x /usr/bin/apt-get
 RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh \
     && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
     && uv --version
@@ -139,15 +158,25 @@ RUN python3 "${EX}/data_prep/extract_codecontests.py" \
     && echo "baked tasks: $(ls "${CC_TASKS_DIR}" | wc -l)  jsonls: $(ls "${EX}"/data/cc_train_*.jsonl | wc -l)"
 
 # --------------------------------------------------------------------------- #
-# 7. Defaults: harbor on :11000, jupyter on :8888, subprocess env, localhost
+# 7. Defaults: harbor on :11000, jupyter on :8888, subprocess env, loopback
 #    wiring. No docker socket, no swe-net.
+#
+# MILES_HOST_IP=127.0.0.1 is load-bearing: miles derives the SGLang router /
+# TITO session-server bind address AND the agent's OPENAI_API_BASE from
+# get_host_info(), which otherwise probes the LAN IP (the container eth0 IP, e.g.
+# 172.17.0.2). The agent runs in a proot sandbox and dials localhost; if the
+# servers bound the eth0 IP instead, every model call fails with a litellm
+# Connection error -> AgentError -> reward 0. Pinning loopback makes the servers
+# bind 127.0.0.1 and advertise 127.0.0.1 consistently, so agents reach the model.
 # --------------------------------------------------------------------------- #
 ENV HARBOR_ENV_TYPE=subprocess \
+    HARBOR_SANDBOX_BACKEND=proot \
     HARBOR_TASKS_DIR=${CC_TASKS_DIR} \
     HARBOR_DELETE_CONTAINERS=true \
     MSWEA_CONFIG_FILE=${REPO_DIR}/examples/experimental/qwen3-codecontests/harbor/codecontests.yaml \
     AGENT_SERVER_URL=http://localhost:11000 \
-    MILES_ROUTER_EXTERNAL_HOST=localhost
+    MILES_HOST_IP=127.0.0.1 \
+    MILES_ROUTER_EXTERNAL_HOST=127.0.0.1
 
 EXPOSE 8888 11000
 CMD ["sleep", "infinity"]
