@@ -1,0 +1,136 @@
+# Single-image, Docker-free qwen3-codecontests workshop.
+#
+# Consolidates the three workshop containers (miles_swe trainer + agent_env
+# Harbor + cc_notebook JupyterLab) into ONE image and removes Docker-in-Docker:
+# Harbor grades each task on the bare host inside a bubblewrap sandbox via the
+# `subprocess` environment (no per-task containers, no docker socket, no
+# swe-net). All inter-service comms collapse to localhost.
+#
+# Build context = repo root (it COPYs miles source + the workshop dir):
+#   docker build -f docker/Dockerfile.workshop -t miles_workshop:v1 .
+# Run (GPU host):
+#   bash docker/run_workshop.sh
+#
+# Inherits the rlsys ROCm/SGLang/Megatron base (same as Dockerfile.cc-base), so
+# this image is MI300/ROCm-specific and large (~75GB base). Other accelerators
+# should adapt from the existing per-arch Dockerfiles.
+FROM rlsys/miles:rocm7-MI300-sglang0.5.9-latest
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1
+
+# --------------------------------------------------------------------------- #
+# 1. SGLang TITO patches (identical to Dockerfile.cc-base).
+# --------------------------------------------------------------------------- #
+COPY docker/cc_patch/sglang_tito.patch /tmp/sglang_tito.patch
+RUN cd /app/sglang \
+    && git apply -p1 /tmp/sglang_tito.patch \
+    && grep -q "return_meta_info" python/sglang/srt/entrypoints/openai/protocol.py \
+    && grep -q "input_ids: Optional" python/sglang/srt/entrypoints/openai/protocol.py \
+    && grep -q "meta_info=choice_meta_info" python/sglang/srt/entrypoints/openai/serving_chat.py \
+    && grep -q "batch_decode(\[\[tid\]" python/sglang/srt/managers/tokenizer_manager.py \
+    && echo "TITO patch applied + verified" \
+    && rm -f /tmp/sglang_tito.patch
+RUN find /app/sglang -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
+# --------------------------------------------------------------------------- #
+# 2. Miles runtime deps not carried by the rlsys base (identical to cc-base).
+#    torch-linked packages use --no-deps so pip can't pull a non-ROCm torch.
+# --------------------------------------------------------------------------- #
+RUN pip install --no-cache-dir \
+        wandb \
+        omegaconf \
+        memray \
+        "mcp[cli]" \
+        qwen_vl_utils \
+        polars \
+        pylatexenc \
+        opentelemetry-exporter-otlp-proto-http \
+    && pip install --no-cache-dir --no-deps \
+        ring_flash_attn \
+        "torchft-nightly==2026.4.3"
+
+# --------------------------------------------------------------------------- #
+# 3. Bare-host grading toolchain (replaces Docker-in-Docker task sandboxes).
+#    - bubblewrap: the subprocess env's sandbox mechanism.
+#    - curl/jq/git: used by the per-task tests/test.sh bootstrap.
+#    The dataset test.sh still curls uv + `uv add`s pytest at runtime (egress
+#    assumed); we also bake uv + pytest + the json-ctrf plugin so the original
+#    `pytest --ctrf` grading path resolves immediately on the default python.
+#    The ctrf plugin's import module is `ctrf` (entry point "ctrf").
+# --------------------------------------------------------------------------- #
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        curl \
+        jq \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -LsSf https://astral.sh/uv/0.7.13/install.sh | sh \
+    && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
+    && uv --version
+RUN pip install --no-cache-dir \
+        "pytest==8.4.1" \
+        "pytest-json-ctrf==0.3.5" \
+    && python -c "import pytest, ctrf; print('pytest + ctrf ok')"
+
+# --------------------------------------------------------------------------- #
+# 4. Harbor (with the subprocess environment) + the mini-swe-agent runner.
+#    Pulled from the fork branch until the subprocess env lands upstream.
+# --------------------------------------------------------------------------- #
+ARG HARBOR_REF=git+https://github.com/TwelveNights/harbor.git@feat/subprocess-environment
+RUN pip install --no-cache-dir \
+        "harbor @ ${HARBOR_REF}" \
+        mini-swe-agent==2.3.0 \
+    && python -c "from harbor.environments.subprocess import SubprocessEnvironment; print('harbor subprocess env ok')"
+
+# --------------------------------------------------------------------------- #
+# 5. JupyterLab + the monitoring libs the notebook imports.
+# --------------------------------------------------------------------------- #
+RUN pip install --no-cache-dir \
+        jupyterlab \
+        plotly \
+        nbformat \
+        pandas
+
+# --------------------------------------------------------------------------- #
+# 6. Miles source + the workshop, then bake the CodeContests dataset.
+#    Installing miles needs its source present (the rlsys base does not bake it).
+#    Baking the dataset removes the §5 HF download from the workshop: the
+#    extracted task dirs and the difficulty-split jsonls ship in the image.
+# --------------------------------------------------------------------------- #
+ENV REPO_DIR=/workspace/miles_aai
+COPY . ${REPO_DIR}
+WORKDIR ${REPO_DIR}
+# Editable install only (no `import miles` here): importing miles_plugins.mbridge
+# pulls in the ROCm torch + megatron.core, which we must not require on a
+# CPU-only build host. The notebook (§3) imports miles at runtime in the GPU
+# container, matching Dockerfile.cc-base's deferred-install design.
+RUN pip install -e . --no-deps --no-build-isolation
+
+# Baked dataset location (overridable at runtime via HARBOR_TASKS_DIR / env).
+ENV CC_TASKS_DIR=/workspace/harbor_tasks_cc
+ENV EX=${REPO_DIR}/examples/experimental/qwen3-codecontests
+# extract_codecontests.py needs pyarrow + huggingface_hub (download path); the
+# rlsys base usually ships huggingface_hub but pyarrow is not guaranteed.
+RUN pip install --no-cache-dir pyarrow huggingface_hub
+RUN python3 "${EX}/data_prep/extract_codecontests.py" \
+        --dataset open-thoughts/CodeContests --out "${CC_TASKS_DIR}" \
+    && python3 "${EX}/data_prep/split_by_difficulty.py" \
+        --tasks "${CC_TASKS_DIR}" --out-dir "${EX}/data" \
+    && echo "baked tasks: $(ls "${CC_TASKS_DIR}" | wc -l)  jsonls: $(ls "${EX}"/data/cc_train_*.jsonl | wc -l)"
+
+# --------------------------------------------------------------------------- #
+# 7. Defaults: harbor on :11000, jupyter on :8888, subprocess env, localhost
+#    wiring. No docker socket, no swe-net.
+# --------------------------------------------------------------------------- #
+ENV HARBOR_ENV_TYPE=subprocess \
+    HARBOR_TASKS_DIR=${CC_TASKS_DIR} \
+    HARBOR_DELETE_CONTAINERS=true \
+    MSWEA_CONFIG_FILE=${REPO_DIR}/examples/experimental/qwen3-codecontests/harbor/codecontests.yaml \
+    AGENT_SERVER_URL=http://localhost:11000 \
+    MILES_ROUTER_EXTERNAL_HOST=localhost
+
+EXPOSE 8888 11000
+CMD ["sleep", "infinity"]
