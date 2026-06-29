@@ -8,3 +8,6 @@ examples/experimental/qwen3-codecontests/data/cc_train_*.jsonl
 **/.ipynb_checkpoints
 *.egg-info
 .venv
+# The legacy multi-container DinD notebook must not ship in the single-image
+# proot build — only run_from_scratch_single.ipynb is the supported entrypoint.
+examples/experimental/qwen3-codecontests/run_from_scratch.ipynb
