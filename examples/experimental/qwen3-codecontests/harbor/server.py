@@ -246,7 +246,7 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
             }
 
         # Environment backend. Defaults to "subprocess": Harbor runs each task on
-        # the bare host inside a bubblewrap sandbox (no Docker, no per-task
+        # the bare host inside a proot sandbox (no Docker, no per-task
         # containers), which is what the single-image workshop uses. Set
         # HARBOR_ENV_TYPE=docker to restore the legacy Docker-in-Docker path.
         env_type = os.getenv("HARBOR_ENV_TYPE", "subprocess").strip().lower()
@@ -258,14 +258,12 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
             # CodeContests tasks ship an environment/Dockerfile (ignored on the
             # bare host) and the agent writes /app/solution.py in one exec that a
             # separate verifier exec grades, so /app must persist across execs.
-            # sandbox_backend defaults to "proot" (userspace, ptrace-based) so the
-            # workshop runs in a fully NON-privileged Kubernetes pod under the
-            # RuntimeDefault seccomp profile; set HARBOR_SANDBOX_BACKEND=bwrap for
-            # privileged/CI hosts with user namespaces.
+            # The subprocess env sandboxes via proot (userspace, ptrace-based), so
+            # the workshop runs in a fully NON-privileged Kubernetes pod under the
+            # RuntimeDefault seccomp profile.
             env_config_kwargs["kwargs"] = {
                 "ignore_build": True,
                 "persist_roots": ["/app"],
-                "sandbox_backend": os.getenv("HARBOR_SANDBOX_BACKEND", "proot"),
             }
         else:
             # Docker path only: extra docker-compose override(s) so task

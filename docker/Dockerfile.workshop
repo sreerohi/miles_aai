@@ -2,7 +2,7 @@
 #
 # Consolidates the three workshop containers (miles_swe trainer + agent_env
 # Harbor + cc_notebook JupyterLab) into ONE image and removes Docker-in-Docker:
-# Harbor grades each task on the bare host inside a bubblewrap sandbox via the
+# Harbor grades each task on the bare host inside a proot sandbox via the
 # `subprocess` environment (no per-task containers, no docker socket, no
 # swe-net). All inter-service comms collapse to localhost.
 #
@@ -52,12 +52,10 @@ RUN pip install --no-cache-dir \
 
 # --------------------------------------------------------------------------- #
 # 3. Bare-host grading toolchain (replaces Docker-in-Docker task sandboxes).
-#    - proot: the DEFAULT subprocess backend (userspace, ptrace-based path
+#    - proot: the subprocess env's sandbox (userspace, ptrace-based path
 #      binding). Needs no namespaces/capabilities, so grading runs in a fully
 #      NON-privileged Kubernetes pod (RuntimeDefault seccomp) -- the right fit
 #      for untrusted task code where the pod is the security boundary.
-#    - bubblewrap: the alternate backend (HARBOR_SANDBOX_BACKEND=bwrap) for
-#      privileged/CI hosts with unprivileged user namespaces.
 #    - curl/jq/git: used by the per-task tests/test.sh bootstrap.
 #    The dataset test.sh still curls uv + `uv add`s pytest at runtime (egress
 #    assumed); we also bake uv + pytest + the json-ctrf plugin so the original
@@ -67,7 +65,6 @@ RUN pip install --no-cache-dir \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         proot \
-        bubblewrap \
         curl \
         jq \
         git \
@@ -170,7 +167,6 @@ RUN python3 "${EX}/data_prep/extract_codecontests.py" \
 # bind 127.0.0.1 and advertise 127.0.0.1 consistently, so agents reach the model.
 # --------------------------------------------------------------------------- #
 ENV HARBOR_ENV_TYPE=subprocess \
-    HARBOR_SANDBOX_BACKEND=proot \
     HARBOR_TASKS_DIR=${CC_TASKS_DIR} \
     HARBOR_DELETE_CONTAINERS=true \
     MSWEA_CONFIG_FILE=${REPO_DIR}/examples/experimental/qwen3-codecontests/harbor/codecontests.yaml \

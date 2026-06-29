@@ -7,7 +7,7 @@ There are two ways to run it:
 
 - **Single image (recommended, Docker-free grading).** One container runs the
   trainer, the Harbor agent server, and JupyterLab. Harbor grades each task on
-  the bare host inside a bubblewrap sandbox via Harbor's `subprocess`
+  the bare host inside a proot sandbox via Harbor's `subprocess`
   environment — no Docker-in-Docker, no per-task containers, no `swe-net`. See
   **[Single-image quickstart](#single-image-quickstart)**.
 - **Multi-container (original).** Three containers on a shared Docker network,
@@ -31,7 +31,7 @@ docker build -f docker/Dockerfile.workshop -t miles_workshop:v1 .   # or: just -
 
 The image installs Harbor (with the `subprocess` environment) from the
 `HARBOR_REF` build arg — by default the fork branch that carries it. It also
-bakes `bubblewrap` + `uv` + `pytest`/`pytest-json-ctrf` so the per-task grader
+bakes `proot` + `uv` + `pytest`/`pytest-json-ctrf` so the per-task grader
 runs on the bare host, and pre-extracts the CodeContests tasks + difficulty
 splits (no §5 download at runtime).
 
@@ -63,16 +63,15 @@ dataset is baked in.
   `Dockerfile.cc-base` (~75GB). Other accelerators should adapt from the
   per-arch Dockerfiles.
 - **Grading sandbox / Kubernetes.** Harbor grades each task on the bare host via
-  the `subprocess` environment's **proot** backend (userspace, ptrace-based path
-  binding). proot needs no namespaces or capabilities, so the workshop runs in a
-  fully **non-privileged** pod under the `RuntimeDefault` seccomp profile — the
-  pod is the security boundary for untrusted task code; there is no
-  Docker-in-Docker and no privileged container. The alternate `bwrap` backend
-  (`HARBOR_SANDBOX_BACKEND=bwrap`) needs unprivileged user namespaces (or a
-  privileged container) and is meant for trusted CI/dev hosts.
-- **Do not co-locate untrusted grading with privileged training.** If a pod runs
-  untrusted code, keep it non-privileged (proot backend); run privileged
-  SGLang/ROCm training in a separate trust domain.
+  the `subprocess` environment, which sandboxes with **proot** (userspace,
+  ptrace-based path binding). proot needs no namespaces or capabilities, so the
+  workshop runs in a fully **non-privileged** pod under the `RuntimeDefault`
+  seccomp profile — the pod is the security boundary for untrusted task code;
+  there is no Docker-in-Docker and no privileged container.
+- **Non-privileged GPU.** Training needs only the ROCm devices (`/dev/kfd`,
+  `/dev/dri`) + their group GIDs (`render`, `video`) and `--ipc host`/shm — NOT
+  `--privileged` (that was only ever needed for the old Docker-in-Docker). The
+  whole pod (training + proot grading) runs non-privileged.
 - **Grading network egress.** Each task's `tests/test.sh` (from the dataset, not
   editable) still `curl`s `uv` and `uv add`s pytest at runtime; the image bakes
   these so the original `pytest --ctrf` path resolves, but PyPI/astral egress is
@@ -80,8 +79,7 @@ dataset is baked in.
 - **Reset is less hermetic.** With one container there is no `docker restart` to
   clear ray/sglang; §9 kills the processes instead. If endpoint errors persist
   after a reset, relaunch the container.
-- **Override knobs:** `HARBOR_SANDBOX_BACKEND=bwrap` switches the sandbox
-  backend; `HARBOR_ENV_TYPE=docker` restores the legacy DinD path;
+- **Override knobs:** `HARBOR_ENV_TYPE=docker` restores the legacy DinD path;
   `HARBOR_TASKS_DIR` points at a different task set; `HARBOR_REF` (build arg)
   pins a different Harbor.
 
