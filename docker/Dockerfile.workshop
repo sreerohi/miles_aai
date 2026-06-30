@@ -119,26 +119,36 @@ RUN uv python install 3.12 \
     && "${HARBOR_PYTHON}" -c "from harbor.environments.subprocess import SubprocessEnvironment; print('harbor subprocess env ok')"
 
 # --------------------------------------------------------------------------- #
-# 4b. Prebuilt aiter JIT kernels (gfx942 / MI300).
-#     aiter compiles ROCm kernels (rmsnorm_quant, mha_batch_prefill, ...) on
-#     first model use, guarded by a FileBaton lock with no timeout. That adds
-#     ~45s to the FIRST SGLang init in every fresh pod AND risks a permanent
-#     hang if a run is killed mid-compile (orphaned lock -> next run waits
-#     forever). Bake the compiled .so files so no kernel ever compiles at
-#     runtime: first-run init drops by ~45s and the lock-hang becomes
-#     impossible. aiter trusts an existing .so by path (no source re-hash), so
-#     these are picked up as-is.
+# 4b. Prebuilt aiter kernels (gfx942 / MI300).
+#     aiter compiles ROCm kernels (rmsnorm_quant, mha_batch_prefill, pa_ragged,
+#     ...) on first model use, guarded by a FileBaton lock with no timeout. That
+#     adds ~45-60s to the FIRST SGLang init in every fresh pod AND risks a
+#     permanent hang if a run is killed mid-compile (orphaned lock -> next run
+#     waits forever). Bake the compiled .so so nothing compiles at runtime:
+#     first-run init drops from ~100s to ~25s and the lock-hang becomes
+#     impossible. aiter trusts an existing .so by path (no source re-hash).
 #
-#     COUPLING: these .so are gfx942-specific and built against THIS base
-#     image's aiter + ROCm + sglang. They are only valid because this image is
-#     built FROM the same rlsys/miles base they were compiled on. If the base
-#     image (aiter/ROCm/sglang) changes, regenerate the tarball from a GPU run:
-#       docker exec <gpu-container> tar czf - -C /app/aiter/aiter/jit build \
+#     There are TWO aiter cache trees, both required:
+#       (1) /app/aiter/aiter/jit  — JIT modules. Reuse fast-path imports the
+#           top-level <module>.so (= get_user_jit_dir()), NOT the
+#           build/<module>/build/<module>.so output tree, so BOTH must be present.
+#       (2) /root/.aiter          — the cpp_itfs AOT cache (pa_ragged paged-attn).
+#           HOME-based; keyed by a deterministic source hash.
+#
+#     COUPLING: these .so are gfx942-specific and built against THIS base image's
+#     aiter + ROCm + sglang. They are only valid because this image is built FROM
+#     the same rlsys/miles base they were compiled on. If the base image changes,
+#     regenerate both tarballs from a warmed GPU run (one that reached rollouts):
+#       docker exec <c> sh -c 'cd /app/aiter/aiter/jit && tar czf - build/ *.so' \
 #         > docker/aiter_prebuilt_gfx942.tgz
-COPY docker/aiter_prebuilt_gfx942.tgz /tmp/aiter_prebuilt.tgz
-RUN tar xzf /tmp/aiter_prebuilt.tgz -C /app/aiter/aiter/jit \
-    && rm /tmp/aiter_prebuilt.tgz \
-    && ls /app/aiter/aiter/jit/build/*/build/*.so
+#       docker exec <c> sh -c 'cd /root && tar czf - .aiter' \
+#         > docker/aiter_prebuilt_home_gfx942.tgz
+COPY docker/aiter_prebuilt_gfx942.tgz /tmp/aiter_jit.tgz
+COPY docker/aiter_prebuilt_home_gfx942.tgz /tmp/aiter_home.tgz
+RUN tar xzf /tmp/aiter_jit.tgz -C /app/aiter/aiter/jit \
+    && tar xzf /tmp/aiter_home.tgz -C /root \
+    && rm /tmp/aiter_jit.tgz /tmp/aiter_home.tgz \
+    && ls /app/aiter/aiter/jit/*.so /root/.aiter/build/*/lib.so
 
 # --------------------------------------------------------------------------- #
 # 5. JupyterLab + the monitoring libs the notebook imports.
