@@ -119,6 +119,28 @@ RUN uv python install 3.12 \
     && "${HARBOR_PYTHON}" -c "from harbor.environments.subprocess import SubprocessEnvironment; print('harbor subprocess env ok')"
 
 # --------------------------------------------------------------------------- #
+# 4b. Prebuilt aiter JIT kernels (gfx942 / MI300).
+#     aiter compiles ROCm kernels (rmsnorm_quant, mha_batch_prefill, ...) on
+#     first model use, guarded by a FileBaton lock with no timeout. That adds
+#     ~45s to the FIRST SGLang init in every fresh pod AND risks a permanent
+#     hang if a run is killed mid-compile (orphaned lock -> next run waits
+#     forever). Bake the compiled .so files so no kernel ever compiles at
+#     runtime: first-run init drops by ~45s and the lock-hang becomes
+#     impossible. aiter trusts an existing .so by path (no source re-hash), so
+#     these are picked up as-is.
+#
+#     COUPLING: these .so are gfx942-specific and built against THIS base
+#     image's aiter + ROCm + sglang. They are only valid because this image is
+#     built FROM the same rlsys/miles base they were compiled on. If the base
+#     image (aiter/ROCm/sglang) changes, regenerate the tarball from a GPU run:
+#       docker exec <gpu-container> tar czf - -C /app/aiter/aiter/jit build \
+#         > docker/aiter_prebuilt_gfx942.tgz
+COPY docker/aiter_prebuilt_gfx942.tgz /tmp/aiter_prebuilt.tgz
+RUN tar xzf /tmp/aiter_prebuilt.tgz -C /app/aiter/aiter/jit \
+    && rm /tmp/aiter_prebuilt.tgz \
+    && ls /app/aiter/aiter/jit/build/*/build/*.so
+
+# --------------------------------------------------------------------------- #
 # 5. JupyterLab + the monitoring libs the notebook imports.
 # --------------------------------------------------------------------------- #
 RUN pip install --no-cache-dir \
@@ -166,13 +188,19 @@ RUN python3 "${EX}/data_prep/extract_codecontests.py" \
 # Connection error -> AgentError -> reward 0. Pinning loopback makes the servers
 # bind 127.0.0.1 and advertise 127.0.0.1 consistently, so agents reach the model.
 # --------------------------------------------------------------------------- #
+# MILES_CUDA_GRAPH_MAX_BS caps the largest CUDA-graph batch size SGLang captures
+# at startup. The workshop's peak rollout concurrency is rollout_batch_size(2) *
+# n_samples_per_prompt(8) = 16, but SGLang otherwise captures graphs up to bs=512
+# (~50 sizes, ~70s on MI300). Capping at 16 collapses capture to ~4s with no
+# throughput loss (no batch ever exceeds 16). Read in rollout_server.py.
 ENV HARBOR_ENV_TYPE=subprocess \
     HARBOR_TASKS_DIR=${CC_TASKS_DIR} \
     HARBOR_DELETE_CONTAINERS=true \
     MSWEA_CONFIG_FILE=${REPO_DIR}/examples/experimental/qwen3-codecontests/harbor/codecontests.yaml \
     AGENT_SERVER_URL=http://localhost:11000 \
     MILES_HOST_IP=127.0.0.1 \
-    MILES_ROUTER_EXTERNAL_HOST=127.0.0.1
+    MILES_ROUTER_EXTERNAL_HOST=127.0.0.1 \
+    MILES_CUDA_GRAPH_MAX_BS=16
 
 EXPOSE 8888 11000
 CMD ["sleep", "infinity"]
