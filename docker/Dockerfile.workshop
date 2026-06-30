@@ -159,6 +159,13 @@ RUN pip install --no-cache-dir \
         nbformat \
         pandas
 
+# Workshop pod entrypoint: starts Harbor (background, proot), waits healthy, then
+# execs JupyterLab. The launcher invokes `start-workshop.sh <jupyter-lab-flags>`
+# so all the static orchestration (aiter-lock backstop, harbor launch, health
+# loop) lives here in the image rather than in a base64-encoded command string.
+COPY docker/start-workshop.sh /usr/local/bin/start-workshop.sh
+RUN chmod +x /usr/local/bin/start-workshop.sh
+
 # --------------------------------------------------------------------------- #
 # 6. Miles source + the workshop, then bake the CodeContests dataset.
 #    Installing miles needs its source present (the rlsys base does not bake it).
